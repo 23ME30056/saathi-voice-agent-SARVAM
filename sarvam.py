@@ -26,6 +26,7 @@ PRICE_TTS_PER_CHAR = 30 / 10_000
 PRICE_LLM_IN = 15 / 1_000_000
 PRICE_LLM_OUT = 60 / 1_000_000
 PRICE_DOC_EXTRACT_PER_PAGE = 1.0
+PRICE_TRANSLATE_PER_CHAR = 20 / 10_000
 
 DOC_JOB_DONE = {"completed", "partially_completed", "failed", "rejected"}
 
@@ -61,7 +62,7 @@ class Meter:
     def __init__(self, path: Path, budget: float):
         self.path, self.budget = path, budget
         self.data = {"spent_inr": 0.0, "stt_seconds": 0.0, "tts_chars": 0, "llm_in_tokens": 0, "llm_out_tokens": 0,
-                     "doc_pages": 0}
+                     "doc_pages": 0, "translate_chars": 0}
         if path.exists():
             self.data.update(json.loads(path.read_text()))
 
@@ -80,7 +81,10 @@ class Meter:
         self.data["spent_inr"] += cost
         for k, v in counts.items():
             self.data[k] += v
-        self.path.write_text(json.dumps(self.data, indent=2))
+        try:
+            self.path.write_text(json.dumps(self.data, indent=2))
+        except OSError:  # read-only disk on some hosts: keep counting in memory
+            pass
 
 
 class Sarvam:
@@ -138,6 +142,41 @@ class Sarvam:
         )
         self.meter.add(len(text) * PRICE_TTS_PER_CHAR, tts_chars=len(text))
         return data["audios"][0]
+
+    async def translate(self, text: str, target: str) -> str:
+        """English -> Indian language with Mayura. Formal mode gives clean native text
+        (the colloquial modes keep many English words, which defeats the point of a translated report)."""
+        data = await self._post("/translate", json={
+            "input": text, "source_language_code": "en-IN", "target_language_code": target,
+            "model": "mayura:v1", "mode": "formal"})
+        self.meter.add(len(text) * PRICE_TRANSLATE_PER_CHAR, translate_chars=len(text))
+        return data["translated_text"]
+
+    async def translate_many(self, texts: list[str], target: str, max_chars: int = 900) -> list[str]:
+        """Translate short texts in few requests: lines are batched under Mayura's 1000-char limit,
+        and a batch falls back to one request per text if the line count doesn't survive."""
+        out = list(texts)
+        batches, cur, size = [], [], 0
+        for i, t in enumerate(texts):
+            if not t.strip():
+                continue
+            if cur and size + len(t) + 1 > max_chars:
+                batches.append(cur)
+                cur, size = [], 0
+            cur.append(i)
+            size += len(t) + 1
+
+        async def run(batch: list[int]) -> list[tuple[int, str]]:
+            joined = "\n".join(texts[i].replace("\n", " ")[:max_chars] for i in batch)
+            lines = [line for line in (await self.translate(joined, target)).split("\n") if line.strip()]
+            if len(lines) != len(batch):
+                lines = await asyncio.gather(*(self.translate(texts[i][:max_chars], target) for i in batch))
+            return list(zip(batch, lines))
+
+        for pairs in await asyncio.gather(*(run(b) for b in batches + ([cur] if cur else []))):
+            for i, line in pairs:
+                out[i] = line.strip()
+        return out
 
     async def extract(self, doc: bytes, filename: str, mime: str, schema: dict,
                       timeout: float = 120) -> tuple[dict, dict]:

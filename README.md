@@ -2,7 +2,7 @@
 
 **Saathi is an AI voice companion that calls elderly parents every day, chats with them warmly in their own language, keeps them safe from scams and missed medicines, and sends the family a short report.**
 
-Built entirely on **Sarvam AI**, using 4 Sarvam models: Saaras v3, Sarvam-105B, Bulbul v3 and Sarvam Vision. It works in **11 Indian languages**.
+Built entirely on **Sarvam AI**, using 5 Sarvam APIs: Saaras v3 (speech-to-text), Sarvam-105B (chat), Bulbul v3 (text-to-speech), Sarvam Vision (document intelligence) and Mayura (translation). It works in **11 Indian languages**.
 
 ![Saathi on a call: Hindi conversation on the left, live check-in filling itself in on the right](docs/3_call.png)
 
@@ -53,7 +53,8 @@ This project comes from the **"Elder Companion Agent"** idea in the Sarvam idea 
 - **Smart medicine tracking**: it knows the time of the call, so a dinner dose at 1 PM is "due later", not "missed".
 - **Family report card** with a summary, alerts, per-medicine status and suggested next steps.
 - **Memory of the day**: a story or happy moment they shared, e.g. *"the first rose bloomed on the terrace today, from the plant her husband planted"*.
-- **One-tap WhatsApp share** and **copy report**, plus the full transcript.
+- **Report in the family's language**: one click translates the whole report into any of 11 Indian languages with **Sarvam Translate (Mayura)**.
+- **One-tap WhatsApp share** (in the chosen language) and **copy report**, plus the full transcript.
 
 ### 📷 Prescription scan (v2)
 - Photo or PDF of a prescription, handwritten or printed. **Sarvam Vision** extracts every medicine, dose code, instruction and duration with confidence scores.
@@ -97,6 +98,7 @@ flowchart LR
     RX["📷 Prescription photo"] --> VIS["Sarvam Vision<br/>schema extraction<br/>+ confidence"]
     VIS --> NORM["Sarvam-105B<br/>doctor shorthand →<br/>plain language"]
     NORM --> LLM
+    REP --> TR["Sarvam Translate<br/>report in the family's language"]
 ```
 
 | Sarvam model | API | Its job in Saathi |
@@ -105,6 +107,7 @@ flowchart LR
 | **Sarvam-105B** | `POST /v1/chat/completions` | Three jobs: (1) holds the conversation, (2) turns the call into a structured health and safety report, (3) rewrites prescription shorthand into plain language |
 | **Bulbul v3** | `POST /text-to-speech` | Speaks Saathi's replies in a warm Indian voice (12 voices to choose from) |
 | **Sarvam Vision** | `POST /doc-ai/v1/job/extract` | Reads handwritten or printed prescriptions into structured fields using a JSON schema |
+| **Mayura (Sarvam Translate)** | `POST /translate` | Translates the family report into the family's own language, batching lines to keep it to one or two requests |
 
 ### Under the hood
 
@@ -122,7 +125,8 @@ flowchart LR
 | Speech-to-text (Saaras v3) | ~0.3 s |
 | Saathi's reply (Sarvam-105B) | 0.4 to 0.9 s |
 | Voice (Bulbul v3, parallel chunks) | 1.2 to 1.6 s |
-| Prescription scan (Vision + 105B) | 5 to 6 s |
+| Prescription scan (Vision + 105B) | 5 to 8 s |
+| Report translation (Mayura) | ~2.5 s |
 
 A full 8–10 reply call costs about **₹4–6** in Sarvam credits, and a prescription scan about **₹1**. New Sarvam accounts get ₹100 free.
 
@@ -143,7 +147,7 @@ A full 8–10 reply call costs about **₹4–6** in Sarvam credits, and a presc
    | 🌹 *"छत पर गुलाब में पहला फूल आया"* (the first rose bloomed on the terrace) | Becomes the **memory of the day** |
    | 🩺 *"सीने में दर्द हो रहा है"* (I have chest pain) | Saathi tells her to call 112 or family, and a red-flag alert appears |
 
-5. Click **End call** to see the family report, then **Send on WhatsApp**.
+5. Click **End call** to see the family report. Switch **"Read this report in"** to हिन्दी (or any other language), then **Send on WhatsApp**.
 
 ---
 
@@ -176,7 +180,8 @@ The repo includes a `Dockerfile`. On any Docker host (Render, Railway, Fly.io, a
 1. Create a web service from this GitHub repo using the Dockerfile.
 2. Set the environment variables:
    - `SARVAM_API_KEY`: your key
-   - `ACCESS_CODE`: any password, so only people you share it with can use your credits
+   - `ACCESS_CODE` (optional): any password, so only people you share it with can use your credits
+   - `BUDGET_INR` (optional): stop API calls after this many rupees of estimated spend (default 90)
 3. The app reads the host's `PORT` automatically. The microphone needs HTTPS, which these hosts provide.
 
 ---
@@ -187,7 +192,7 @@ The repo includes a `Dockerfile`. On any Docker host (Render, Railway, Fly.io, a
 |---|---|
 | `persona.py` | Saathi's personality, conversation and safety rules, report schema, prescription schema, voices, budget settings |
 | `app.py` | FastAPI server: call start, conversation turns, live insights and report, prescription scan, access-code lock |
-| `sarvam.py` | Sarvam API client (STT, chat, TTS, Vision jobs), credit meter, language and script detection |
+| `sarvam.py` | Sarvam API client (STT, chat, TTS, Vision jobs, translation), credit meter, language and script detection |
 | `static/index.html` | The whole web app in one file: setup, prescription scan, call screen with voice detection, live panel, report |
 | `samples/` | Demo prescription photo |
 | `docs/` | Screenshots |
@@ -197,7 +202,7 @@ The repo includes a `Dockerfile`. On any Docker host (Render, Railway, Fly.io, a
 
 | Layer | Tech |
 |---|---|
-| AI | **Sarvam AI**: Saaras v3 (STT), Sarvam-105B (LLM), Bulbul v3 (TTS), Sarvam Vision (document AI) |
+| AI | **Sarvam AI**: Saaras v3 (STT), Sarvam-105B (LLM), Bulbul v3 (TTS), Sarvam Vision (document AI), Mayura (translation) |
 | Backend | Python, FastAPI, httpx (async), Uvicorn |
 | Frontend | Plain HTML, CSS and JavaScript (no build step), MediaRecorder API, Web Audio API (voice detection), Canvas (photo resizing) |
 | Sharing | WhatsApp share links |
@@ -222,5 +227,6 @@ The repo includes a `Dockerfile`. On any Docker host (Render, Railway, Fly.io, a
 
 ## Versions
 
+- **v2.1**: family report in 11 languages with Sarvam Translate, hosting-ready Dockerfile (non-root, configurable `BUDGET_INR`).
 - **v2**: prescription scan with Sarvam Vision and Sarvam-105B, tap-to-try suggestions, how-it-works intro, stronger missed-dose safety rule, smarter "due later" medicine logic, access-code lock, Dockerfile.
 - **v1**: voice calls in 11 languages, scam shield, health red flags, live checklist, family report with WhatsApp share, memory of the day, parallel TTS, gender-correct grammar, credit meter.

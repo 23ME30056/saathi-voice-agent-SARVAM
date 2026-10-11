@@ -140,7 +140,10 @@
   /* report */
   .report { padding: 24px; max-width: 760px; margin: 8px auto 40px; }
   .report h2 { margin: 0; font-size: 22px; letter-spacing: -.01em; }
-  .report .date { margin: 2px 0 16px; color: var(--muted); font-size: 13px; }
+  .report .date { margin: 2px 0 12px; color: var(--muted); font-size: 13px; }
+  .report-lang { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; font-size: 13px; color: var(--muted); }
+  .report-lang select { width: auto; padding: 5px 9px; font-size: 13px; }
+  #report-lang-status { color: var(--accent); }
   .report .summary { font-size: 16px; margin: 0 0 18px; }
   .report section { margin-top: 20px; }
   .report ul.actions { margin: 0; padding-left: 20px; }
@@ -249,7 +252,7 @@
   <main id="report" hidden>
     <article class="card report" id="report-body"></article>
   </main>
-  <footer>Built on Sarvam AI · Saaras v3 hears · Sarvam-105B thinks and writes reports · Bulbul v3 speaks · Sarvam Vision reads prescriptions</footer>
+  <footer>Built on Sarvam AI · Saaras v3 hears · Sarvam-105B thinks and writes reports · Bulbul v3 speaks · Sarvam Vision reads prescriptions · Sarvam Translate speaks the family's language</footer>
 </div>
 
 <script>
@@ -622,11 +625,50 @@ $('#end-btn').addEventListener('click', async () => {
     fd.append('session_id', S.sid);
     const { insights, spent } = await api('/api/insights', { method: 'POST', body: fd });
     showSpent(spent);
-    renderReport(insights);
+    showReport(insights);
   } catch (err) {
-    if (S.insights) renderReport(S.insights); else renderReportError(err.message);
+    if (S.insights) showReport(S.insights); else renderReportError(err.message);
   }
 });
+
+// ---------- report in the family's language: Sarvam Translate (Mayura) ----------
+const REPORT_LANGS = { 'en-IN': 'English', 'hi-IN': 'हिन्दी Hindi', 'bn-IN': 'বাংলা Bengali', 'mr-IN': 'मराठी Marathi',
+  'ta-IN': 'தமிழ் Tamil', 'te-IN': 'తెలుగు Telugu', 'kn-IN': 'ಕನ್ನಡ Kannada', 'ml-IN': 'മലയാളം Malayalam',
+  'gu-IN': 'ગુજરાતી Gujarati', 'pa-IN': 'ਪੰਜਾਬੀ Punjabi', 'od-IN': 'ଓଡ଼ିଆ Odia' };
+
+function showReport(d) {
+  S.report = { cache: { 'en-IN': d } };
+  renderReport(d, 'en-IN');
+}
+function reportTexts(d) { // [object, key] for every free-text field in a report
+  const items = [];
+  const add = (obj, key) => { if (obj && obj[key]) items.push([obj, key]); };
+  add(d, 'summary'); add(d, 'memory');
+  for (const k of ['mood', 'sleep', 'meals', 'symptoms', 'scam']) add(d[k], 'note');
+  (d.medicines || []).forEach((m) => add(m, 'note'));
+  (d.alerts || []).forEach((_, i) => add(d.alerts, i));
+  (d.family_actions || []).forEach((_, i) => add(d.family_actions, i));
+  return items;
+}
+async function setReportLang(lang) {
+  if (S.report.cache[lang]) return renderReport(S.report.cache[lang], lang);
+  const copy = structuredClone(S.report.cache['en-IN']);
+  const items = reportTexts(copy);
+  $('#report-lang').disabled = true;
+  $('#report-lang-status').textContent = 'Translating with Sarvam Translate…';
+  try {
+    const { texts, spent } = await api('/api/translate', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: items.map(([o, k]) => o[k]), target: lang }) });
+    items.forEach(([o, k], i) => { o[k] = texts[i]; });
+    S.report.cache[lang] = copy;
+    showSpent(spent);
+    renderReport(copy, lang);
+  } catch (err) {
+    $('#report-lang').disabled = false;
+    $('#report-lang').value = 'en-IN';
+    $('#report-lang-status').textContent = err.message;
+  }
+}
 
 function shareText(d) {
   const line = (t, i) => `${t}: ${LABEL[i?.status] || 'Not discussed'}${i?.note ? ' (' + i.note + ')' : ''}`;
@@ -643,12 +685,18 @@ function shareText(d) {
   return parts.join('\n');
 }
 
-function renderReport(d) {
+function renderReport(d, lang) {
   const actions = d.family_actions?.filter(Boolean) || [];
   $('#report-body').innerHTML = `
     <h2>${esc(callee())}'s check-in</h2>
     <p class="date">${esc(new Date().toLocaleString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', hour: 'numeric', minute: '2-digit' }))}
       · ${esc($('#timer').textContent)} call · for ${esc(S.profile.family || 'the family')}</p>
+    <div class="report-lang">
+      <label for="report-lang">Read this report in</label>
+      <select id="report-lang">${Object.entries(REPORT_LANGS).map(([code, name]) =>
+        `<option value="${code}"${code === lang ? ' selected' : ''}>${esc(name)}</option>`).join('')}</select>
+      <span id="report-lang-status">${lang === 'en-IN' ? '' : 'Translated by Sarvam Translate'}</span>
+    </div>
     ${alertsHTML(d)}
     <p class="summary">${esc(d.summary || 'No summary available.')}</p>
     ${d.memory ? `<section><h3>Memory of the day</h3><blockquote class="memory">${esc(d.memory)}</blockquote></section>` : ''}
@@ -666,6 +714,7 @@ function renderReport(d) {
     try { await navigator.clipboard.writeText(shareText(d)); $('#copy-btn').textContent = 'Copied'; } catch { $('#copy-btn').textContent = 'Copy failed'; }
   };
   $('#again-btn').onclick = () => show('setup');
+  $('#report-lang').onchange = (e) => setReportLang(e.target.value);
 }
 function renderReportError(msg) {
   $('#report-body').innerHTML = `<h2>No report</h2><p class="muted">${esc(msg)}</p><div class="report-btns"><button class="btn" id="again-btn">Back</button></div>`;

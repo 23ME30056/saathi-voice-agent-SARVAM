@@ -20,7 +20,7 @@ import persona
 from sarvam import (HERE, TTS_LANGS, BudgetExceeded, Meter, Sarvam, SarvamError, sentence_chunks, speakable,
                     tts_language)
 
-meter = Meter(HERE / "usage.json", persona.BUDGET_INR)
+meter = Meter(HERE / "usage.json", float(os.getenv("BUDGET_INR", persona.BUDGET_INR)))
 sarvam = Sarvam(meter)
 app = FastAPI(title=persona.NAME)
 app.mount("/samples", StaticFiles(directory=HERE / "samples"), name="samples")  # demo prescription photo
@@ -188,6 +188,23 @@ async def prescription(file: UploadFile = File(...)):
     return {"medicines": "\n".join(line for line in lines if line), "count": len(meds),
             "doctor": result.get("doctor") or "", "advice": result.get("advice") or "", "unsure": unsure,
             "ms": {"vision": vision_ms, "llm": ms(t)}, "spent": round(meter.spent, 4)}
+
+
+class TranslateRequest(BaseModel):
+    texts: list[str]
+    target: str
+
+
+@app.post("/api/translate")
+async def translate(req: TranslateRequest):
+    """Family report in the family's own language, via Sarvam Translate (Mayura)."""
+    if req.target not in persona.LANGUAGES.values():
+        raise HTTPException(400, "Unsupported language.")
+    if req.target == "en-IN":
+        return {"texts": req.texts, "spent": round(meter.spent, 4)}
+    if len(req.texts) > 60 or sum(len(t) for t in req.texts) > 6000:
+        raise HTTPException(413, "That report is too long to translate.")
+    return {"texts": await sarvam.translate_many(req.texts, req.target), "spent": round(meter.spent, 4)}
 
 
 @app.post("/api/insights")
