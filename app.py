@@ -5,13 +5,15 @@ import asyncio
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
 
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import persona
@@ -21,6 +23,19 @@ from sarvam import (HERE, TTS_LANGS, BudgetExceeded, Meter, Sarvam, SarvamError,
 meter = Meter(HERE / "usage.json", persona.BUDGET_INR)
 sarvam = Sarvam(meter)
 app = FastAPI(title=persona.NAME)
+app.mount("/samples", StaticFiles(directory=HERE / "samples"), name="samples")  # demo prescription photo
+
+# Set ACCESS_CODE when deploying publicly so strangers can't spend your Sarvam credits
+ACCESS_CODE = os.getenv("ACCESS_CODE", "").strip()
+
+
+@app.middleware("http")
+async def require_access_code(request: Request, call_next):
+    path = request.url.path
+    if ACCESS_CODE and path.startswith("/api/") and path != "/api/config" \
+            and not secrets.compare_digest(request.headers.get("x-access-code", ""), ACCESS_CODE):
+        return JSONResponse({"detail": "Wrong or missing access code."}, status_code=401)
+    return await call_next(request)
 
 
 class Profile(BaseModel):
@@ -102,7 +117,7 @@ async def config():
     return {"name": persona.NAME, "tagline": persona.TAGLINE, "profile": persona.DEFAULT_PROFILE,
             "languages": list(persona.LANGUAGES),
             "voices": [{"id": v, "gender": g} for v, g in persona.VOICES.items()],
-            "budget": meter.budget, "spent": round(meter.spent, 4)}
+            "budget": meter.budget, "spent": round(meter.spent, 4), "locked": bool(ACCESS_CODE)}
 
 
 @app.post("/api/call/start")
@@ -135,6 +150,46 @@ async def turn(session_id: str = Form(...), speak: bool = Form(True), text: str 
     return {"user_text": text, "user_lang": user_lang, **out}
 
 
+def min_confidence(node) -> float:
+    """Lowest confidence score anywhere in a Sarvam Vision annotation subtree."""
+    if isinstance(node, dict):
+        own = [node["confidence"]] if isinstance(node.get("confidence"), (int, float)) else []
+        return min(own + [min_confidence(v) for v in node.values() if isinstance(v, (dict, list))], default=1.0)
+    if isinstance(node, list):
+        return min((min_confidence(v) for v in node), default=1.0)
+    return 1.0
+
+
+@app.post("/api/prescription")
+async def prescription(file: UploadFile = File(...)):
+    """Prescription photo -> Sarvam Vision extracts the medicines -> Sarvam-105B writes Saathi's medicine list."""
+    blob = await file.read()
+    if len(blob) > 10_000_000:
+        raise HTTPException(413, "That file is too big. Please use a photo under 10 MB.")
+    t = time.perf_counter()
+    result, notes = await sarvam.extract(blob, file.filename or "prescription.jpg",
+                                         (file.content_type or "image/jpeg").split(";")[0], persona.PRESCRIPTION_SCHEMA)
+    vision_ms = ms(t)
+    rows = result.get("medicines") or []
+    row_notes = notes.get("medicines") or []
+    meds, unsure = [], []
+    for i, row in enumerate(rows):
+        if isinstance(row, dict) and row.get("name"):
+            meds.append(row)
+            if i < len(row_notes) and min_confidence(row_notes[i]) < 0.75:
+                unsure.append(row["name"])
+    if not meds:
+        raise HTTPException(422, "Couldn't find any medicines in that photo. Try a sharper, well-lit photo.")
+
+    t = time.perf_counter()
+    text = await sarvam.chat([{"role": "system", "content": persona.MEDS_PROMPT},
+                              {"role": "user", "content": json.dumps(meds, ensure_ascii=False)}], 400, temperature=0)
+    lines = [re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", line).strip() for line in text.splitlines()]
+    return {"medicines": "\n".join(line for line in lines if line), "count": len(meds),
+            "doctor": result.get("doctor") or "", "advice": result.get("advice") or "", "unsure": unsure,
+            "ms": {"vision": vision_ms, "llm": ms(t)}, "spent": round(meter.spent, 4)}
+
+
 @app.post("/api/insights")
 async def insights(session_id: str = Form(...)):
     """Structured read of the call so far: powers the live checklist and the family report."""
@@ -157,5 +212,6 @@ async def insights(session_id: str = Form(...)):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
+    host = os.getenv("HOST", "0.0.0.0" if "PORT" in os.environ else "127.0.0.1")  # hosting platforms set PORT
     print(f"\n  {persona.NAME} is live at http://127.0.0.1:{port}\n")
-    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=port, log_level="warning")
+    uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -74,6 +74,38 @@ List every medicine from their medicine list in "medicines", using a short name.
 Use the time of the call: a dose whose time has not come yet is "due_later"; mark "missed" only if they said they skipped or forgot it.
 Saathi already advised the elder during the call, so "family_actions" are things the family should do."""
 
+# Sarvam Vision reads a prescription photo into this shape (field descriptions guide the extraction)
+PRESCRIPTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "medicines": {
+            "type": "array",
+            "description": "Every medicine prescribed on this prescription, in order",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "Medicine name with strength exactly as written, e.g. Tab Amlodipine 5mg"},
+                    "dosage": {"type": "string", "description": "Dosing pattern as written, e.g. 1-0-1, BD, OD, once daily"},
+                    "instructions": {"type": "string", "description": "When or how to take it, e.g. after food, before breakfast, at bedtime"},
+                    "duration": {"type": "string", "description": "How long to take it, e.g. 30 days; empty if not written"},
+                },
+            },
+        },
+        "doctor": {"type": "string", "description": "Name of the prescribing doctor"},
+        "advice": {"type": "string", "description": "Any other advice written on it, such as diet, exercise, tests or next review date"},
+    },
+}
+
+# Sarvam-105B turns the raw extraction into the plain lines Saathi talks from
+MEDS_PROMPT = """You turn medicines read from a doctor's prescription into a simple list for an elderly person's care companion.
+Write one line per medicine, exactly in this format:
+Medicine name strength (what it is for) - when to take it
+Rules:
+- Expand dosing codes into plain words: 1-0-0 = morning, 0-1-0 = afternoon, 0-0-1 = night, 1-0-1 = morning and night, 1-1-1 = morning, afternoon and night, OD = once a day, BD = twice a day, TDS = three times a day, HS = at bedtime. Keep instructions like "after food" or "before breakfast".
+- "What it is for": the medicine's common use in 1-3 plain words (e.g. BP, sugar, cholesterol, acidity, pain). Write "?" if unsure.
+- Drop "Tab"/"Cap" prefixes. Add the duration at the end in brackets if given, e.g. "(for 15 days)".
+- Output only the lines: no numbering, bullets, headings or extra text."""
+
 # Speech-to-text mode: transcribe | translate (to English) | verbatim | translit | codemix
 STT_MODE = "transcribe"
 PACE = 0.9  # bulbul pace, 0.5 - 2.0; a touch slower is easier for elderly listeners

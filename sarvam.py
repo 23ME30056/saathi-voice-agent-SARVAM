@@ -1,8 +1,10 @@
 """Thin async wrapper around Sarvam's speech-to-text, chat and text-to-speech APIs,
 plus a local credit meter so the ₹100 budget doesn't vanish by accident."""
+import asyncio
 import json
 import os
 import re
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -23,6 +25,9 @@ PRICE_STT_PER_SEC = 30 / 3600
 PRICE_TTS_PER_CHAR = 30 / 10_000
 PRICE_LLM_IN = 15 / 1_000_000
 PRICE_LLM_OUT = 60 / 1_000_000
+PRICE_DOC_EXTRACT_PER_PAGE = 1.0
+
+DOC_JOB_DONE = {"completed", "partially_completed", "failed", "rejected"}
 
 TTS_LANGS = {"bn-IN", "en-IN", "gu-IN", "hi-IN", "kn-IN", "ml-IN", "mr-IN", "od-IN", "pa-IN", "ta-IN", "te-IN"}
 
@@ -55,7 +60,8 @@ class Meter:
 
     def __init__(self, path: Path, budget: float):
         self.path, self.budget = path, budget
-        self.data = {"spent_inr": 0.0, "stt_seconds": 0.0, "tts_chars": 0, "llm_in_tokens": 0, "llm_out_tokens": 0}
+        self.data = {"spent_inr": 0.0, "stt_seconds": 0.0, "tts_chars": 0, "llm_in_tokens": 0, "llm_out_tokens": 0,
+                     "doc_pages": 0}
         if path.exists():
             self.data.update(json.loads(path.read_text()))
 
@@ -86,7 +92,10 @@ class Sarvam:
 
     async def _post(self, path: str, **kwargs) -> dict:
         self.meter.guard()
-        r = await self.http.post(path, **kwargs)
+        return await self._request("POST", path, **kwargs)
+
+    async def _request(self, method: str, path: str, **kwargs) -> dict:
+        r = await self.http.request(method, path, **kwargs)
         if r.status_code >= 400:
             try:
                 body = r.json()
@@ -129,6 +138,27 @@ class Sarvam:
         )
         self.meter.add(len(text) * PRICE_TTS_PER_CHAR, tts_chars=len(text))
         return data["audios"][0]
+
+    async def extract(self, doc: bytes, filename: str, mime: str, schema: dict,
+                      timeout: float = 120) -> tuple[dict, dict]:
+        """Sarvam Vision structured extraction: start the job, poll it, fetch (result, annotations).
+        Annotations mirror the result, with a confidence score on every leaf."""
+        job = await self._post("/doc-ai/v1/job/extract", files={"file": (filename, doc, mime)},
+                               data={"schema": json.dumps(schema), "output_format": "json"})
+        job_id, deadline = job["job_id"], time.monotonic() + timeout
+        while True:
+            status = await self._request("GET", f"/doc-ai/v1/job/{job_id}/status")
+            if status["status"] in DOC_JOB_DONE:
+                break
+            if time.monotonic() > deadline:
+                raise SarvamError("Sarvam Vision is taking too long to read this document. Try again.")
+            await asyncio.sleep(1.5)
+        pages = (status.get("usage") or {}).get("pages_processed") or 1
+        self.meter.add(pages * PRICE_DOC_EXTRACT_PER_PAGE, doc_pages=pages)
+        if status["status"] in ("failed", "rejected"):
+            raise SarvamError(f"Sarvam Vision couldn't read this document (job {status['status']}).")
+        res = await self._request("GET", f"/doc-ai/v1/job/{job_id}/results")
+        return res.get("result") or {}, res.get("annotations") or {}
 
 
 def tts_language(text: str, hint: str | None) -> str:
