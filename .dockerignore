@@ -1,0 +1,6 @@
+.env
+usage.json
+__pycache__/
+.git/
+docs/
+work.py
