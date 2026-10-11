@@ -172,16 +172,32 @@
   </header>
 
   <!-- 1. Setup -->
-  <main id="setup">
+  <main id="setup" class="setup-wrap">
+    <ol class="steps">
+      <li><span class="num">1</span><b>Set up once</b><span>Tell Saathi about your parent. Scan their prescription and the medicines fill in by themselves.</span></li>
+      <li><span class="num">2</span><b>Saathi calls them</b><span>A warm chat in their language about mood, meals, medicines and health, with a watch out for scams.</span></li>
+      <li><span class="num">3</span><b>You get a report</b><span>Alerts the moment something is wrong, and a daily summary to send on WhatsApp.</span></li>
+    </ol>
     <form class="card" id="setup-form">
       <h2>Who should Saathi call today?</h2>
-      <p class="lede">Saathi checks in on mood, meals, medicines and health, warns about scams, and sends the family a report after the call.</p>
+      <p class="lede">In this demo <b>you play the parent</b>: Saathi talks to you through your browser, so allow the microphone. The form is filled in with an example. Change anything you like.</p>
       <div class="grid">
         <label class="field">Name <input name="name" required></label>
         <label class="field">Saathi calls them <input name="call_them" placeholder="e.g. Amma, Dadi, Kamla ji"></label>
         <label class="field">Age <input name="age" inputmode="numeric"></label>
         <label class="field">Language <select name="language" id="language"></select></label>
-        <label class="field full">Medicines <small>One per line: name, what it's for, when</small><textarea name="medicines" rows="3"></textarea></label>
+        <div class="field full">
+          <div class="field-head">
+            <label for="medicines">Medicines <small>One per line: name (what it's for) - when</small></label>
+            <div class="scan-btns">
+              <button type="button" class="btn small soft" id="scan-btn" title="Take or upload a photo of the prescription. Sarvam Vision reads it.">📷 Scan prescription</button>
+              <button type="button" class="btn small" id="sample-btn" title="Scan a sample prescription photo">Try a sample</button>
+              <input type="file" id="scan-file" accept="image/*,application/pdf" hidden>
+            </div>
+          </div>
+          <textarea name="medicines" id="medicines" rows="4"></textarea>
+          <div class="scan-note" id="scan-note" hidden></div>
+        </div>
         <label class="field full">About them <small>Anything that helps Saathi talk like it knows them</small><textarea name="notes" rows="2"></textarea></label>
         <label class="field">Family to update <input name="family"></label>
         <label class="field">Saathi's voice <select name="voice" id="voice"></select></label>
@@ -209,8 +225,9 @@
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0"/><path d="M12 17v4"/></svg>
           </button>
         </div>
+        <div class="try" id="try"></div>
         <form id="type-form">
-          <input id="type-input" type="text" placeholder="Or type as the elder (saves credits)" autocomplete="off">
+          <input id="type-input" type="text" placeholder="Or type as the parent (saves credits)" autocomplete="off">
           <button class="btn">Send</button>
         </form>
         <div class="toggles">
@@ -221,6 +238,7 @@
     </div>
     <aside class="card live" id="live">
       <h3>Live check-in</h3>
+      <p class="sub">Sarvam-105B fills this in from the conversation as you talk.</p>
       <div id="live-alerts"></div>
       <div class="rows" id="live-rows"></div>
     </aside>
@@ -230,6 +248,7 @@
   <main id="report" hidden>
     <article class="card report" id="report-body"></article>
   </main>
+  <footer>Built on Sarvam AI · Saaras v3 hears · Sarvam-105B thinks and writes reports · Bulbul v3 speaks · Sarvam Vision reads prescriptions</footer>
 </div>
 
 <script>
@@ -253,12 +272,19 @@ const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } cat
 const voiceOn = () => $('#speak').checked;
 const secs = (ms) => (ms / 1000).toFixed(1) + 's';
 
-async function api(url, opts) {
-  const r = await fetch(url, opts);
+async function api(url, opts = {}) {
+  const headers = { ...(opts.headers || {}) };
+  if (S.code) headers['X-Access-Code'] = S.code;
+  const r = await fetch(url, { ...opts, headers });
   let data = {};
   try { data = await r.json(); } catch {}
+  if (r.status === 401) { askCode(true); throw new Error('This demo needs an access code. Enter it and try again.'); }
   if (!r.ok) throw new Error(typeof data.detail === 'string' ? data.detail : `${r.status} ${r.statusText}`);
   return data;
+}
+function askCode(wrong) {
+  const code = prompt((wrong ? "That code didn't work. " : '') + 'This Saathi demo is private. Enter the access code:');
+  if (code) { S.code = code.trim(); save('saathi-code', S.code); }
 }
 function show(id) { for (const s of ['setup', 'call', 'report']) $('#' + s).hidden = s !== id; }
 function setStatus(t) { $('#status').textContent = t; }
@@ -300,6 +326,87 @@ async function init() {
     const el = $('#setup-form').elements[k];
     if (el) el.value = v;
   }
+  S.code = load('saathi-code');
+  if (S.cfg.locked && !S.code) askCode(false);
+}
+
+// ---------- prescription scan: Sarvam Vision reads it, Sarvam-105B tidies it ----------
+async function shrinkImage(file, max = 2000) {
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, max / Math.max(bmp.width, bmp.height));
+    const c = document.createElement('canvas');
+    c.width = Math.round(bmp.width * scale); c.height = Math.round(bmp.height * scale);
+    c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+    return await new Promise((res) => c.toBlob((b) => res(b || file), 'image/jpeg', 0.88));
+  } catch { return file; } // unknown format: let the server try the original
+}
+
+async function scanPrescription(file, isSample = false) {
+  const note = $('#scan-note');
+  const buttons = [$('#scan-btn'), $('#sample-btn')];
+  buttons.forEach((b) => (b.disabled = true));
+  note.hidden = false; note.className = 'scan-note';
+  note.textContent = 'Sarvam Vision is reading the prescription… (about 10 seconds)';
+  try {
+    const isPdf = file.type === 'application/pdf';
+    const fd = new FormData();
+    fd.append('file', isPdf ? file : await shrinkImage(file), isPdf ? file.name : 'prescription.jpg');
+    const d = await api('/api/prescription', { method: 'POST', body: fd });
+    $('#medicines').value = d.medicines;
+    const notes = $('#setup-form').elements.notes;
+    if (d.advice && !notes.value.includes(d.advice)) notes.value = `${notes.value.trim()} Doctor's advice: ${d.advice}`.trim();
+    showSpent(d.spent);
+    note.className = 'scan-note ok';
+    note.innerHTML = `✓ Read ${d.count} medicine${d.count === 1 ? '' : 's'}${d.doctor ? ` from ${esc(d.doctor)}'s prescription` : ''}`
+      + ` in ${secs(d.ms.vision + d.ms.llm)}${d.advice ? ", and added the doctor's advice to “About them”" : ''}. Please check the list.`
+      + (d.unsure.length ? ` <b>Not sure about: ${esc(d.unsure.join(', '))}.</b>` : '')
+      + (isSample ? ' <a href="/samples/prescription_demo.jpg" target="_blank" rel="noopener">See the photo it read</a>' : '');
+  } catch (err) {
+    note.className = 'scan-note bad';
+    note.textContent = err.message;
+  } finally {
+    buttons.forEach((b) => (b.disabled = false));
+  }
+}
+
+$('#scan-btn').addEventListener('click', () => $('#scan-file').click());
+$('#scan-file').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (file) scanPrescription(file);
+});
+$('#sample-btn').addEventListener('click', async () => {
+  const blob = await (await fetch('/samples/prescription_demo.jpg')).blob();
+  scanPrescription(new File([blob], 'prescription_demo.jpg', { type: 'image/jpeg' }), true);
+});
+
+// ---------- "try saying" suggestions, so first-time users know what to test ----------
+const TRY_LINES = {
+  Hindi: [
+    ['😴 Bad sleep', 'हाँ बेटा, ठीक हूँ। बस रात को घुटनों में दर्द था, ठीक से नींद नहीं आई।'],
+    ['💊 Missed a tablet', 'सुबह की BP की गोली ले ली, पर दोपहर में शुगर की गोली भूल गई।'],
+    ['🚨 Scam call', 'आज एक आदमी का फोन आया, बोला CBI से हूँ, आपका डिजिटल अरेस्ट होगा, OTP बताओ।'],
+    ['🌹 Happy memory', 'आज छत पर गुलाब में पहला फूल आया, तुम्हारे दादाजी ने लगाया था वो पौधा।'],
+    ['🩺 Feeling unwell', 'थोड़ा सीने में दर्द हो रहा है और साँस फूल रही है।'],
+  ],
+  English: [
+    ['😴 Bad sleep', "I'm fine, but my knees hurt last night so I couldn't sleep well."],
+    ['💊 Missed a tablet', 'I took my BP tablet in the morning but forgot my sugar tablet after lunch.'],
+    ['🚨 Scam call', 'A man called saying he is from CBI, I am under digital arrest and must tell him the OTP.'],
+    ['🌹 Happy memory', 'The first rose bloomed on the terrace today, the plant your grandfather planted.'],
+    ['🩺 Feeling unwell', 'I have some chest pain and I am feeling breathless.'],
+  ],
+};
+function renderTry() {
+  const lines = TRY_LINES[S.profile.language] || TRY_LINES.English;
+  $('#try').innerHTML = `<span>You are ${esc(callee())}. Talk back, or tap to try:</span>`
+    + lines.map(([label, line], i) => `<button type="button" class="chip-btn" data-i="${i}" title="${esc(line)}">${esc(label)}</button>`).join('');
+  $('#try').querySelectorAll('.chip-btn').forEach((b) => b.addEventListener('click', () => {
+    if (S.busy || !S.sid) return;
+    b.classList.add('used');
+    sendText(lines[b.dataset.i][1]);
+  }));
 }
 
 $('#setup-form').addEventListener('submit', (e) => {
@@ -312,6 +419,7 @@ $('#setup-form').addEventListener('submit', (e) => {
   $('#callee').textContent = callee();
   $('#timer').textContent = 'Ringing…';
   renderLive(null);
+  renderTry();
   show('call');
   ensureMic().catch(() => {}); // ask for mic permission now, while we have a user gesture
   exchange('start', () => api('/api/call/start?speak=' + voiceOn(), {
@@ -442,6 +550,10 @@ $('#type-form').addEventListener('submit', (e) => {
   const text = $('#type-input').value.trim();
   if (!text || S.busy || !S.sid) return;
   $('#type-input').value = '';
+  sendText(text);
+});
+
+function sendText(text) {
   stopListening(true); stopPlayback();
   addMsg('user', text);
   S.transcript.push({ who: callee(), text });
@@ -450,7 +562,7 @@ $('#type-form').addEventListener('submit', (e) => {
   fd.append('speak', voiceOn());
   fd.append('text', text);
   exchange('text', () => api('/api/turn', { method: 'POST', body: fd }));
-});
+}
 
 // ---------- live checklist ----------
 function row(title, item) {
